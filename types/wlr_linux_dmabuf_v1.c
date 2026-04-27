@@ -897,6 +897,10 @@ static bool set_default_feedback(struct wlr_linux_dmabuf_v1 *linux_dmabuf,
 		return false;
 	}
 
+#ifdef __ANDROID__
+	wlr_log(WLR_INFO, "Android: skipping DRM device open for dmabuf feedback");
+	int main_device_fd = -1;
+#else
 	drmDevice *device = NULL;
 	if (drmGetDeviceFromDevId(feedback->main_device, 0, &device) != 0) {
 		wlr_log_errno(WLR_ERROR, "drmGetDeviceFromDevId failed");
@@ -921,6 +925,7 @@ static bool set_default_feedback(struct wlr_linux_dmabuf_v1 *linux_dmabuf,
 			"skipping DMA-BUF import checks", device->nodes[DRM_NODE_PRIMARY]);
 		drmFreeDevice(&device);
 	}
+#endif
 
 	size_t tranches_len =
 		feedback->tranches.size / sizeof(struct wlr_linux_dmabuf_feedback_v1_tranche);
@@ -949,7 +954,9 @@ static bool set_default_feedback(struct wlr_linux_dmabuf_v1 *linux_dmabuf,
 
 error_formats:
 	wlr_drm_format_set_finish(&formats);
+#ifndef __ANDROID__
 error_compiled:
+#endif
 	compiled_feedback_destroy(compiled);
 	return false;
 }

@@ -4,7 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#ifndef __ANDROID__
 #include <gbm.h>
+#endif
 #include <wlr/render/egl.h>
 #include <wlr/util/log.h>
 #include <wlr/util/region.h>
@@ -204,10 +206,12 @@ static struct wlr_egl *egl_create(void) {
 
 	wlr_log(WLR_INFO, "Supported EGL client extensions: %s", client_exts_str);
 
+#ifndef __ANDROID__
 	if (!check_egl_ext(client_exts_str, "EGL_EXT_platform_base")) {
 		wlr_log(WLR_ERROR, "EGL_EXT_platform_base not supported");
 		return NULL;
 	}
+#endif
 
 	struct wlr_egl *egl = calloc(1, sizeof(*egl));
 	if (egl == NULL) {
@@ -215,8 +219,10 @@ static struct wlr_egl *egl_create(void) {
 		return NULL;
 	}
 
+#ifndef __ANDROID__
 	load_egl_proc(&egl->procs.eglGetPlatformDisplayEXT,
 		"eglGetPlatformDisplayEXT");
+#endif
 
 	egl->exts.KHR_platform_gbm = check_egl_ext(client_exts_str,
 			"EGL_KHR_platform_gbm");
@@ -284,6 +290,27 @@ static bool egl_init_display(struct wlr_egl *egl, EGLDisplay display,
 
 	egl->exts.EXT_image_dma_buf_import =
 		check_egl_ext(display_exts_str, "EGL_EXT_image_dma_buf_import");
+#ifdef __ANDROID__
+	if (!egl->exts.EXT_image_dma_buf_import) {
+		// IMPORTANT: This aliasing tricks wlroots into enabling DMA-BUF texture
+		// import paths, which we then intercept in gles2/renderer.c with the
+		// AHardwareBuffer path (create_egl_image_from_ahb). If wlroots adds NEW
+		// consumers of EXT_image_dma_buf_import that call eglCreateImageKHR with
+		// DMA-BUF attributes directly, those will fail on Android. Review this
+		// aliasing on every wlroots version bump.
+		//
+		// Android equivalent: EGL_ANDROID_image_native_buffer +
+		// EGL_ANDROID_get_native_client_buffer → eglCreateImageKHR with
+		// EGL_NATIVE_BUFFER_ANDROID target.
+		egl->exts.EXT_image_dma_buf_import =
+			check_egl_ext(display_exts_str, "EGL_ANDROID_image_native_buffer") &&
+			check_egl_ext(display_exts_str, "EGL_ANDROID_get_native_client_buffer");
+		if (egl->exts.EXT_image_dma_buf_import) {
+			wlr_log(WLR_INFO,
+				"Using EGL_ANDROID_image_native_buffer as DMA-BUF import equivalent");
+		}
+	}
+#endif
 	if (check_egl_ext(display_exts_str,
 			"EGL_EXT_image_dma_buf_import_modifiers")) {
 		egl->exts.EXT_image_dma_buf_import_modifiers = true;
@@ -533,6 +560,7 @@ static EGLDeviceEXT get_egl_device_from_drm_fd(struct wlr_egl *egl,
 	return egl_device;
 }
 
+#ifndef __ANDROID__
 static int open_render_node(int drm_fd) {
 	char *render_name = drmGetRenderDeviceNameFromFd(drm_fd);
 	if (render_name == NULL) {
@@ -554,6 +582,7 @@ static int open_render_node(int drm_fd) {
 	free(render_name);
 	return render_fd;
 }
+#endif
 
 struct wlr_egl *wlr_egl_create_with_drm_fd(int drm_fd) {
 	bool allow_software = drm_fd < 0;
@@ -582,6 +611,7 @@ struct wlr_egl *wlr_egl_create_with_drm_fd(int drm_fd) {
 		wlr_log(WLR_DEBUG, "EXT_platform_device not supported");
 	}
 
+#ifndef __ANDROID__
 	if (egl->exts.KHR_platform_gbm && drm_fd >= 0) {
 		int gbm_fd = open_render_node(drm_fd);
 		if (gbm_fd < 0) {
@@ -606,6 +636,7 @@ struct wlr_egl *wlr_egl_create_with_drm_fd(int drm_fd) {
 	} else {
 		wlr_log(WLR_DEBUG, "KHR_platform_gbm not supported");
 	}
+#endif
 
 error:
 	wlr_log(WLR_ERROR, "Failed to initialize EGL context");
@@ -662,11 +693,13 @@ void wlr_egl_destroy(struct wlr_egl *egl) {
 
 	eglReleaseThread();
 
+#ifndef __ANDROID__
 	if (egl->gbm_device) {
 		int gbm_fd = gbm_device_get_fd(egl->gbm_device);
 		gbm_device_destroy(egl->gbm_device);
 		close(gbm_fd);
 	}
+#endif
 
 	free(egl);
 }
@@ -829,6 +862,24 @@ static int get_egl_dmabuf_formats(struct wlr_egl *egl, EGLint **formats) {
 		wlr_log(WLR_DEBUG, "DMA-BUF import extension not present");
 		return -1;
 	}
+
+#ifdef __ANDROID__
+	// On Android, report formats supported by AHardwareBuffer.
+	// Must match the formats in ahb_allocator's drm_format_table.
+	static const EGLint android_formats[] = {
+		DRM_FORMAT_ABGR8888,
+		DRM_FORMAT_XBGR8888,
+		DRM_FORMAT_RGB565,
+	};
+	int android_num = sizeof(android_formats) / sizeof(android_formats[0]);
+	*formats = calloc(android_num, sizeof(**formats));
+	if (!*formats) {
+		wlr_log_errno(WLR_ERROR, "Allocation failed");
+		return -1;
+	}
+	memcpy(*formats, android_formats, android_num * sizeof(**formats));
+	return android_num;
+#endif
 
 	// when we only have the image_dmabuf_import extension we can't query
 	// which formats are supported. These two are on almost always
@@ -1043,6 +1094,7 @@ int wlr_egl_dup_drm_fd(struct wlr_egl *egl) {
 		return fd;
 	}
 
+#ifndef __ANDROID__
 	// Fallback to GBM's FD if we can't use EGLDevice
 	if (egl->gbm_device == NULL) {
 		return -1;
@@ -1053,6 +1105,9 @@ int wlr_egl_dup_drm_fd(struct wlr_egl *egl) {
 		wlr_log_errno(WLR_ERROR, "Failed to dup GBM FD");
 	}
 	return fd;
+#else
+	return -1;
+#endif
 }
 
 EGLSyncKHR wlr_egl_create_sync(struct wlr_egl *egl, int fence_fd) {

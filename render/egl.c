@@ -848,7 +848,12 @@ EGLImageKHR wlr_egl_create_image_from_dmabuf(struct wlr_egl *egl,
 	EGLImageKHR image = egl->procs.eglCreateImageKHR(egl->display, EGL_NO_CONTEXT,
 		EGL_LINUX_DMA_BUF_EXT, NULL, attribs);
 	if (image == EGL_NO_IMAGE_KHR) {
-		wlr_log(WLR_ERROR, "eglCreateImageKHR failed");
+		EGLint err = eglGetError();
+		wlr_log(WLR_ERROR, "eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT) failed: "
+			"EGL error 0x%x, format=0x%x %dx%d modifier=0x%llx n_planes=%d fd[0]=%d",
+			err, attributes->format, attributes->width, attributes->height,
+			(unsigned long long)attributes->modifier,
+			attributes->n_planes, attributes->fd[0]);
 		return EGL_NO_IMAGE_KHR;
 	}
 

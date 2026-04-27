@@ -14,11 +14,68 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
+#ifndef __ANDROID__
 #include <xf86drm.h>
+#endif
 #include "render/egl.h"
 #include "render/gles2.h"
 #include "render/pixel_format.h"
 #include "util/time.h"
+
+#ifdef __ANDROID__
+#include <android/hardware_buffer.h>
+#include <EGL/eglext.h>
+#include <sys/stat.h>
+// AHB registry: defined in compositor/src/ahb_registry.c, linked into same binary
+extern AHardwareBuffer *ahb_registry_lookup(uint64_t inode);
+
+// WARNING: Partial struct layout that MUST match ahb_allocator.h exactly.
+// The ahb_buffer struct is defined in compositor/src/ahb_allocator.h.
+// We cannot #include it from wlroots source, so we duplicate the prefix.
+// Only 'base' (offset 0) and 'ahb' (offset sizeof(struct wlr_buffer)) are
+// accessed. If ahb_allocator.h changes the field order, update this copy.
+struct ahb_buffer {
+	struct wlr_buffer base;
+	AHardwareBuffer *ahb;
+	// AHardwareBuffer_Desc desc, void *locked_data follow — unused here
+};
+extern struct ahb_buffer *ahb_buffer_try_from_wlr(struct wlr_buffer *buffer);
+
+static EGLImageKHR create_egl_image_from_ahb(struct wlr_egl *egl,
+		AHardwareBuffer *ahb) {
+	/* Single-threaded: wlroots renders on one thread */
+	static PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC fn_cache = NULL;
+	static bool fn_loaded = false;
+	if (!fn_loaded) {
+		fn_cache = (PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC)
+			eglGetProcAddress("eglGetNativeClientBufferANDROID");
+		fn_loaded = true;
+	}
+	if (!fn_cache) {
+		wlr_log(WLR_ERROR, "eglGetNativeClientBufferANDROID not available");
+		return EGL_NO_IMAGE_KHR;
+	}
+
+	EGLClientBuffer client_buffer = fn_cache(ahb);
+	if (!client_buffer) {
+		wlr_log(WLR_ERROR, "eglGetNativeClientBufferANDROID failed");
+		return EGL_NO_IMAGE_KHR;
+	}
+
+	EGLint attrs[] = {
+		EGL_IMAGE_PRESERVED_KHR, EGL_TRUE,
+		EGL_NONE,
+	};
+
+	EGLImageKHR image = egl->procs.eglCreateImageKHR(egl->display,
+		EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, client_buffer, attrs);
+	if (image == EGL_NO_IMAGE_KHR) {
+		wlr_log(WLR_ERROR,
+			"eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID) failed");
+	}
+	return image;
+}
+#endif /* __ANDROID__ */
 
 #include "common_vert_src.h"
 #include "quad_frag_src.h"
@@ -138,6 +195,40 @@ struct wlr_gles2_buffer *gles2_buffer_get_or_create(struct wlr_gles2_renderer *r
 	buffer->buffer = wlr_buffer;
 	buffer->renderer = renderer;
 
+#ifdef __ANDROID__
+	// Try Android AHardwareBuffer path first — bypasses dmabuf entirely
+	{
+		struct ahb_buffer *abuf = ahb_buffer_try_from_wlr(wlr_buffer);
+		if (abuf) {
+			buffer->image = create_egl_image_from_ahb(renderer->egl, abuf->ahb);
+			if (buffer->image != EGL_NO_IMAGE_KHR) {
+				buffer->external_only = false;
+				goto image_created;
+			}
+			wlr_log(WLR_DEBUG, "AHB EGLImage failed, trying dmabuf fallback");
+		}
+	}
+	// Path 2: Buffer from virgl server (dmabuf fd → inode → AHB registry lookup)
+	{
+		struct wlr_dmabuf_attributes dmabuf = {0};
+		if (wlr_buffer_get_dmabuf(wlr_buffer, &dmabuf) && dmabuf.n_planes >= 1) {
+			struct stat st;
+			if (fstat(dmabuf.fd[0], &st) == 0) {
+				AHardwareBuffer *ahb = ahb_registry_lookup((uint64_t)st.st_ino);
+				if (ahb) {
+					buffer->image = create_egl_image_from_ahb(renderer->egl, ahb);
+					AHardwareBuffer_release(ahb);  // release lookup ref
+					if (buffer->image != EGL_NO_IMAGE_KHR) {
+						buffer->external_only = false;
+						wlr_log(WLR_INFO, "AHB registry hit for inode %lu", (unsigned long)st.st_ino);
+						goto image_created;
+					}
+				}
+			}
+		}
+	}
+#endif
+
 	struct wlr_dmabuf_attributes dmabuf = {0};
 	if (!wlr_buffer_get_dmabuf(wlr_buffer, &dmabuf)) {
 		goto error_buffer;
@@ -149,6 +240,9 @@ struct wlr_gles2_buffer *gles2_buffer_get_or_create(struct wlr_gles2_renderer *r
 		goto error_buffer;
 	}
 
+#ifdef __ANDROID__
+image_created:
+#endif
 	wlr_addon_init(&buffer->addon, &wlr_buffer->addons, renderer,
 		&buffer_addon_impl);
 
@@ -683,12 +777,14 @@ struct wlr_renderer *wlr_gles2_renderer_create(struct wlr_egl *egl) {
 
 	get_gles2_shm_formats(renderer, &renderer->shm_texture_formats);
 
+#ifndef __ANDROID__
 	int drm_fd = wlr_renderer_get_drm_fd(&renderer->wlr_renderer);
 	uint64_t cap_syncobj_timeline;
 	if (drm_fd >= 0 && drmGetCap(drm_fd, DRM_CAP_SYNCOBJ_TIMELINE, &cap_syncobj_timeline) == 0) {
 		renderer->wlr_renderer.features.timeline = egl->procs.eglDupNativeFenceFDANDROID &&
 			egl->procs.eglWaitSyncKHR && cap_syncobj_timeline != 0;
 	}
+#endif
 
 	return &renderer->wlr_renderer;
 

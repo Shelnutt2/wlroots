@@ -8,6 +8,68 @@
 #include <wlr/config.h>
 #include "util/shm.h"
 
+#ifdef __ANDROID__
+/* Android bionic doesn't provide shm_open/shm_unlink at API < 30.
+ * Use memfd_create via syscall (available since Android 8 / API 26). */
+#include <stdio.h>
+#include <sys/syscall.h>
+#include <linux/memfd.h>
+
+static int android_memfd_create(const char *name, unsigned int flags) {
+	return (int)syscall(SYS_memfd_create, name, flags);
+}
+
+int allocate_shm_file(size_t size) {
+	int fd = android_memfd_create("wlroots", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	if (fd < 0) {
+		return -1;
+	}
+	int ret;
+	do {
+		ret = ftruncate(fd, size);
+	} while (ret < 0 && errno == EINTR);
+	if (ret < 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+bool allocate_shm_file_pair(size_t size, int *rw_fd_ptr, int *ro_fd_ptr) {
+	int rw_fd = android_memfd_create("wlroots", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	if (rw_fd < 0) {
+		return false;
+	}
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/self/fd/%d", rw_fd);
+	int ro_fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (ro_fd < 0) {
+		/* /proc/self/fd reopen blocked by SELinux — fall back to dup().
+		 * Both FDs will be read-write, which is acceptable on Android
+		 * where compositor and clients share the same UID. */
+		ro_fd = dup(rw_fd);
+		if (ro_fd < 0) {
+			close(rw_fd);
+			return false;
+		}
+		fcntl(ro_fd, F_SETFD, FD_CLOEXEC);
+	}
+	int ret;
+	do {
+		ret = ftruncate(rw_fd, size);
+	} while (ret < 0 && errno == EINTR);
+	if (ret < 0) {
+		close(rw_fd);
+		close(ro_fd);
+		return false;
+	}
+	*rw_fd_ptr = rw_fd;
+	*ro_fd_ptr = ro_fd;
+	return true;
+}
+
+#else /* !__ANDROID__ */
+
 #define RANDNAME_PATTERN "/wlroots-XXXXXX"
 
 static void randname(char *buf) {
@@ -95,3 +157,5 @@ bool allocate_shm_file_pair(size_t size, int *rw_fd_ptr, int *ro_fd_ptr) {
 	*ro_fd_ptr = ro_fd;
 	return true;
 }
+
+#endif /* __ANDROID__ */

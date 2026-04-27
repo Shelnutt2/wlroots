@@ -417,8 +417,15 @@ struct wlr_texture *gles2_texture_from_buffer(struct wlr_renderer *wlr_renderer,
 	size_t stride;
 	struct wlr_dmabuf_attributes dmabuf;
 	if (wlr_buffer_get_dmabuf(buffer, &dmabuf)) {
-		return gles2_texture_from_dmabuf(renderer, buffer, &dmabuf);
-	} else if (wlr_buffer_begin_data_ptr_access(buffer,
+		struct wlr_texture *tex = gles2_texture_from_dmabuf(renderer, buffer, &dmabuf);
+		if (tex != NULL) {
+			return tex;
+		}
+		wlr_log(WLR_INFO,
+			"dmabuf EGLImage import failed, trying CPU upload fallback");
+		// Fall through to begin_data_ptr_access path below
+	}
+	if (wlr_buffer_begin_data_ptr_access(buffer,
 			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride)) {
 		struct wlr_texture *tex = gles2_texture_from_pixels(wlr_renderer,
 			format, stride, buffer->width, buffer->height, data);

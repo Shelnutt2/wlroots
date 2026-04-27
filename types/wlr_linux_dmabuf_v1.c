@@ -1,8 +1,11 @@
 #include <assert.h>
 #include <drm_fourcc.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <wlr/backend.h>
 #include <wlr/config.h>
@@ -121,9 +124,81 @@ static bool buffer_get_dmabuf(struct wlr_buffer *wlr_buffer,
 	return true;
 }
 
+static bool buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer,
+		uint32_t flags, void **data, uint32_t *format, size_t *stride) {
+	struct wlr_dmabuf_v1_buffer *buffer = dmabuf_v1_buffer_from_buffer(wlr_buffer);
+
+	wlr_log(WLR_INFO, "linux-dmabuf CPU fallback: enter flags=0x%x n_planes=%d format=0x%x fd[0]=%d %dx%d stride=%u",
+			flags, buffer->attributes.n_planes, buffer->attributes.format,
+			buffer->attributes.fd[0], wlr_buffer->width, wlr_buffer->height,
+			buffer->attributes.stride[0]);
+
+	// Only support read access on single-plane buffers
+	if (flags != WLR_BUFFER_DATA_PTR_ACCESS_READ ||
+			buffer->attributes.n_planes != 1) {
+		wlr_log(WLR_ERROR, "linux-dmabuf CPU fallback: rejected flags=0x%x n_planes=%d",
+				flags, buffer->attributes.n_planes);
+		return false;
+	}
+
+	size_t size = (size_t)buffer->attributes.stride[0] * wlr_buffer->height;
+
+	// Check if fd is large enough for the requested mapping
+	struct stat st;
+	if (fstat(buffer->attributes.fd[0], &st) == 0) {
+		if ((off_t)(size + buffer->attributes.offset[0]) > st.st_size) {
+			wlr_log(WLR_ERROR, "linux-dmabuf CPU fallback: fd size %jd < needed %zu+%u",
+					(intmax_t)st.st_size, size, buffer->attributes.offset[0]);
+			// If offset is 0 and fd has data, try with actual fd size
+			if (buffer->attributes.offset[0] == 0 && st.st_size > 0) {
+				size = (size_t)st.st_size;
+			} else {
+				return false;
+			}
+		}
+	}
+
+	// Handle non-page-aligned offset
+	long page_size = sysconf(_SC_PAGESIZE);
+	off_t aligned_offset = buffer->attributes.offset[0] & ~(page_size - 1);
+	size_t extra = buffer->attributes.offset[0] - aligned_offset;
+
+	void *map = mmap(NULL, size + extra, PROT_READ, MAP_SHARED,
+			buffer->attributes.fd[0], aligned_offset);
+	if (map == MAP_FAILED) {
+		wlr_log(WLR_ERROR, "linux-dmabuf CPU fallback mmap failed: fd=%d size=%zu offset=%u errno=%d (%s)",
+				buffer->attributes.fd[0], size, buffer->attributes.offset[0],
+				errno, strerror(errno));
+		return false;
+	}
+
+	wlr_log(WLR_DEBUG, "linux-dmabuf CPU fallback mmap OK: fd=%d %zux%d stride=%u",
+			buffer->attributes.fd[0], size, wlr_buffer->height, buffer->attributes.stride[0]);
+	wlr_log(WLR_INFO, "linux-dmabuf CPU fallback: format=0x%08x -> will try gles2_texture_from_pixels",
+			buffer->attributes.format);
+
+	buffer->mapped_data = map;
+	buffer->mapped_size = size + extra;
+	*data = (char *)map + extra;
+	*format = buffer->attributes.format;
+	*stride = buffer->attributes.stride[0];
+	return true;
+}
+
+static void buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer) {
+	struct wlr_dmabuf_v1_buffer *buffer = dmabuf_v1_buffer_from_buffer(wlr_buffer);
+	if (buffer->mapped_data) {
+		munmap(buffer->mapped_data, buffer->mapped_size);
+		buffer->mapped_data = NULL;
+		buffer->mapped_size = 0;
+	}
+}
+
 static const struct wlr_buffer_impl buffer_impl = {
 	.destroy = buffer_destroy,
 	.get_dmabuf = buffer_get_dmabuf,
+	.begin_data_ptr_access = buffer_begin_data_ptr_access,
+	.end_data_ptr_access = buffer_end_data_ptr_access,
 };
 
 static void buffer_handle_release(struct wl_listener *listener, void *data) {

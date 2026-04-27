@@ -23,6 +23,8 @@ struct wlr_dmabuf_v1_buffer {
 
 	struct wl_resource *resource; // can be NULL if the client destroyed it
 	struct wlr_dmabuf_attributes attributes;
+	void *mapped_data;
+	size_t mapped_size;
 
 	struct {
 		struct wl_listener release;

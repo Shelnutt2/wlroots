@@ -35,6 +35,8 @@ struct wlr_dmabuf_buffer {
 	struct wlr_buffer base;
 	struct wlr_dmabuf_attributes dmabuf;
 	bool saved;
+	void *mapped_data;
+	size_t mapped_size;
 };
 
 /**

@@ -12,7 +12,9 @@
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/types/wlr_output_layer.h>
 #include <wlr/util/log.h>
+#ifndef __ANDROID__
 #include <xf86drm.h>
+#endif
 #include "linux-dmabuf-v1-protocol.h"
 #include "render/drm_format_set.h"
 #include "util/shm.h"
@@ -212,6 +214,7 @@ static bool check_import_dmabuf(struct wlr_dmabuf_attributes *attribs, void *dat
 		return true;
 	}
 
+#ifndef __ANDROID__
 	// TODO: check number of planes
 	for (int i = 0; i < attribs->n_planes; i++) {
 		uint32_t handle = 0;
@@ -225,6 +228,9 @@ static bool check_import_dmabuf(struct wlr_dmabuf_attributes *attribs, void *dat
 		}
 	}
 	return true;
+#else
+	return true;
+#endif
 }
 
 static void params_create_common(struct wl_resource *params_resource,

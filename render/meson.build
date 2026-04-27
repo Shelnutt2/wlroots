@@ -26,7 +26,10 @@ endif
 internal_config.set10('HAVE_EVENTFD', cc.has_header('sys/eventfd.h'))
 
 if 'gles2' in renderers or 'auto' in renderers
-	egl = dependency('egl', required: 'gles2' in renderers)
+	egl = dependency('egl', required: false)
+	if not egl.found()
+		egl = cc.find_library('EGL', required: 'gles2' in renderers)
+	endif
 	if egl.found()
 		eglext_version = cc.get_define(
 			'EGL_EGLEXT_VERSION',
@@ -41,9 +44,16 @@ if 'gles2' in renderers or 'auto' in renderers
 			)
 		endif
 	endif
-	gbm = dependency('gbm', required: 'gles2' in renderers)
-	if egl.found() and gbm.found()
-		wlr_deps += [egl, gbm]
+	if target_machine.system() != 'android'
+		gbm = dependency('gbm', required: 'gles2' in renderers)
+	else
+		gbm = dependency('', required: false)
+	endif
+	if egl.found()
+		wlr_deps += egl
+		if gbm.found()
+			wlr_deps += gbm
+		endif
 		wlr_files += files('egl.c')
 		internal_features += { 'egl': true }
 	endif

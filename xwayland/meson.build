@@ -20,22 +20,18 @@ if not get_option('xwayland').disabled()
 	msg += 'Required for Xwayland support.'
 endif
 
-xwayland = dependency(
-	'xwayland',
-	required: get_option('xwayland'),
-	fallback: 'xserver',
-	default_options: [
-		'werror=false',
-		'xorg=false',
-		'xephyr=false',
-		'xwayland=true',
-		'xnest=false',
-		'xvfb=false',
-	],
-)
-if not xwayland.found()
+
+# Android: The XWayland binary runs inside proot, not as a native binary.
+# Skip the pkg-config check for the xwayland binary.  The path is overridden
+# at runtime via the WLR_XWAYLAND environment variable (see server.c).
+if get_option('xwayland').disabled()
 	subdir_done()
 endif
+internal_config.set_quoted('XWAYLAND_PATH', '/usr/bin/Xwayland')
+internal_config.set10('HAVE_XWAYLAND_LISTENFD', false)
+internal_config.set10('HAVE_XWAYLAND_NO_TOUCH_POINTER_EMULATION', false)
+internal_config.set10('HAVE_XWAYLAND_FORCE_XRANDR_EMULATION', false)
+internal_config.set10('HAVE_XWAYLAND_TERMINATE_DELAY', false)
 
 foreach lib : xwayland_required
 	dep = dependency(lib,
@@ -67,18 +63,6 @@ foreach lib, desc : xwayland_optional
 	xwayland_libs += dep
 endforeach
 
-xwayland_feature_names = [
-	'listenfd',
-	'no_touch_pointer_emulation',
-	'force_xrandr_emulation',
-	'terminate_delay',
-]
-
-internal_config.set_quoted('XWAYLAND_PATH', xwayland.get_variable('xwayland'))
-foreach name : xwayland_feature_names
-	have = xwayland.get_variable('have_' + name, default_value: 'false') == 'true'
-	internal_config.set10('HAVE_XWAYLAND_' + name.to_upper(), have)
-endforeach
 
 wlr_files += files(
 	'selection/dnd.c',
@@ -94,5 +78,5 @@ wlr_files += files(
 wlr_deps += xwayland_libs
 features += { 'xwayland': true }
 
-have = cc.has_function('xcb_xfixes_set_client_disconnect_mode', dependencies: xwayland_libs)
-internal_config.set10('HAVE_XCB_XFIXES_SET_CLIENT_DISCONNECT_MODE', have)
+# Android: xcb is built from source (libxcb 1.17.0 has this function).
+internal_config.set10('HAVE_XCB_XFIXES_SET_CLIENT_DISCONNECT_MODE', true)
